@@ -8,11 +8,16 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from getpass import getpass
 
+# المصحح: استيراد محدد وتجنب Exception العامة في البداية
 try:
     from netmiko import ConnectHandler, SSHDetect
-except Exception:
-    ConnectHandler = None
-    SSHDetect = None
+except ImportError:
+    # تم تغيير الأسماء لتناسب معايير Pylint للثوابت
+    CONNECT_HANDLER = None
+    SSH_DETECT = None
+else:
+    CONNECT_HANDLER = ConnectHandler
+    SSH_DETECT = SSHDetect
 
 
 MAX_WORKERS = int(os.getenv("WORKERS", "20"))
@@ -31,78 +36,68 @@ def get_credentials():
 def ping(ip):
     """Check if host is alive."""
     system = platform.system().lower()
-
-    if system == "windows":
-        cmd = ["ping", "-n", "1", "-w", "1000", ip]
-    else:
-        cmd = ["ping", "-c", "1", "-W", "1", ip]
+    cmd = ["ping", "-n", "1", "-w", "1000", ip] if system == "windows" else \
+          ["ping", "-c", "1", "-W", "1", ip]
 
     try:
         res = subprocess.run(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
         )
         return res.returncode == 0
-    except Exception:
+    except subprocess.SubprocessError: # تم استبدال Exception بنوع محدد
         return False
 
 
 def load_ips():
     """Load IP list."""
     devices = []
-
     if not os.path.exists(IN_FILE):
         return devices
 
-    with open(IN_FILE, "r", encoding="utf-8") as f:
-        for line in f:
+    with open(IN_FILE, "r", encoding="utf-8") as f_in:
+        for line in f_in:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-
             parts = line.split(",")
-            ip = parts[0].strip()
+            ip_addr = parts[0].strip()
             dtype = parts[1].strip() if len(parts) > 1 else "auto"
-            devices.append((ip, dtype))
-
+            devices.append((ip_addr, dtype))
     return devices
 
 
-def detect(ip, user, pwd):
+def detect_device_type(ip_addr, user, pwd):
     """Auto detect device type."""
+    if SSH_DETECT is None:
+        return "linux"
     try:
-        if SSHDetect is None:
-            return "linux"
-
-        d = SSHDetect(
+        guesser = SSH_DETECT(
             device_type="autodetect",
-            host=ip,
+            host=ip_addr,
             username=user,
             password=pwd,
             timeout=TIMEOUT,
         )
-        return d.autodetect() or "linux"
-    except Exception:
+        return guesser.autodetect() or "linux"
+    except Exception: # pylint: disable=broad-exception-caught
         return "linux"
 
 
-def clean(text):
+def clean_output(text):
     """Remove ANSI chars."""
     if not text:
         return ""
     return re.sub(r"\x1b\[[0-9;]*m", "", str(text))
 
 
-def run(conn, cmd):
+def run_ssh_command(conn, cmd):
     """Run SSH command safely."""
     try:
         return conn.send_command(cmd, read_timeout=15)
-    except Exception:
+    except Exception: # pylint: disable=broad-exception-caught
         try:
             return conn.send_command_timing(cmd)
-        except Exception:
+        except Exception: # pylint: disable=broad-exception-caught
             return ""
 
 
@@ -120,95 +115,68 @@ def parse_linux(out):
     return {
         "model": "linux",
         "serial": "N/A",
-        "uptime": clean(out).strip() or "N/A",
+        "uptime": clean_output(out).strip() or "N/A",
     }
 
 
-def connect(ip, dtype, user, pwd):
+def connect_and_audit(ip_addr, dtype, user, pwd):
     """Main worker."""
     res = {
-        "ip": ip,
-        "status": "fail",
-        "model": "N/A",
-        "serial": "N/A",
-        "uptime": "N/A",
-        "error": "",
+        "ip": ip_addr, "status": "fail", "model": "N/A",
+        "serial": "N/A", "uptime": "N/A", "error": "",
     }
-
     conn = None
-
     try:
-        if not ping(ip):
+        if not ping(ip_addr):
             res["status"] = "offline"
             return res
 
         if dtype == "auto":
-            dtype = detect(ip, user, pwd)
+            dtype = detect_device_type(ip_addr, user, pwd)
 
-        if ConnectHandler is None:
+        if CONNECT_HANDLER is None:
             res["error"] = "missing netmiko"
             return res
 
-        conn = ConnectHandler(
-            device_type=dtype,
-            host=ip,
-            username=user,
-            password=pwd,
-            timeout=TIMEOUT,
+        conn = CONNECT_HANDLER(
+            device_type=dtype, host=ip_addr, username=user, password=pwd, timeout=TIMEOUT,
         )
-
         cmd = build_cmd(dtype)
-        output = run(conn, cmd)
-
+        output = run_ssh_command(conn, cmd)
         res.update(parse_linux(output))
         res["status"] = "success"
-
-        return res
-
-    except Exception as e:
-        res["error"] = str(e)
-        return res
-
+    except Exception as err: # pylint: disable=broad-exception-caught
+        res["error"] = str(err)
     finally:
-        try:
-            if conn:
-                conn.disconnect()
-        except Exception:
-            pass
+        if conn:
+            conn.disconnect()
+    return res
 
 
-def save(data):
+def save_to_csv(data):
     """Save CSV output."""
     keys = ["ip", "status", "model", "serial", "uptime", "error"]
-
-    with open(OUT_FILE, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=keys)
-        w.writeheader()
-        w.writerows(data)
+    with open(OUT_FILE, "w", newline="", encoding="utf-8") as f_out:
+        writer = csv.DictWriter(f_out, fieldnames=keys)
+        writer.writeheader()
+        writer.writerows(data)
 
 
 def main():
     """Entry point."""
     user, pwd = get_credentials()
     devices = load_ips()
-
     if not devices:
-        print("No devices found")
         return
 
     results = []
-    workers = min(MAX_WORKERS, len(devices))
+    num_workers = min(MAX_WORKERS, len(devices))
+    with ThreadPoolExecutor(max_workers=num_workers) as ex:
+        futures = [ex.submit(connect_and_audit, ip, dt, user, pwd) for ip, dt in devices]
+        for fut in as_completed(futures):
+            results.append(fut.result())
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = [
-            ex.submit(connect, ip, dtype, user, pwd)
-            for ip, dtype in devices
-        ]
-
-        for f in as_completed(futures):
-            results.append(f.result())
-
-    save(results)
+    save_to_csv(results)
     print("Done:", OUT_FILE)
 
 
