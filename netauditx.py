@@ -71,7 +71,7 @@ def ping(ip_addr):
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=2 # Security: added timeout to ping process
+            timeout=2  # Security: added timeout to ping process
         )
         return res.returncode == 0
     except Exception:
@@ -80,8 +80,8 @@ def ping(ip_addr):
 def load_inventory():
     """Load IP inventory and remove duplicates to save resources."""
     devices = []
-    seen_ips = set() # Fix for Resource Exhaustion: skip duplicate entries
-    
+    seen_ips = set()  # Fix for Resource Exhaustion: skip duplicate entries
+
     if not os.path.exists(IN_FILE):
         return devices
 
@@ -205,20 +205,20 @@ def save_results(results):
     with open(OUT_FILE, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=fields)
         writer.writeheader()
-        
+
         # Apply CSV Injection protection to every field
         sanitized_results = []
         for row in results:
             clean_row = {k: sanitize_for_csv(v) for k, v in row.items()}
             sanitized_results.append(clean_row)
-            
+
         writer.writerows(sanitized_results)
 
 def main():
     """Main execution flow for NetAuditX."""
     print("NetAuditX v1.0.1 - Security Patched Version")
     print("-" * 40)
-    
+
     user, pwd = get_credentials()
     devices = load_inventory()
 
