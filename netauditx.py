@@ -10,8 +10,7 @@ from getpass import getpass
 
 try:
     from netmiko import ConnectHandler, SSHDetect
-except ImportError:
-    # يسمح للـ CI يمر حتى لو netmiko غير مثبت (Pylint-safe fallback)
+except Exception:  # fallback for CI
     ConnectHandler = None
     SSHDetect = None
 
@@ -23,29 +22,41 @@ IP_FILE = "ips.txt"
 
 
 def get_credentials():
+    """Get credentials from environment or user input."""
     username = os.getenv("NOC_USER") or input("Username: ").strip()
     password = os.getenv("NOC_PASS") or getpass("Password: ")
     return username, password
 
 
 def ping(ip):
+    """Check host reachability using ping."""
     system = platform.system().lower()
-    cmd = ["ping", "-n", "1", "-w", "1000", ip] if system == "windows" else ["ping", "-c", "1", "-W", "1", ip]
+
+    if system == "windows":
+        cmd = ["ping", "-n", "1", "-w", "1000", ip]
+    else:
+        cmd = ["ping", "-c", "1", "-W", "1", ip]
 
     try:
-        return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        return subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode == 0
     except Exception:
         return False
 
 
 def load_ips():
+    """Load devices from inventory file."""
     devices = []
 
     if not os.path.exists(IP_FILE):
         return devices
 
-    with open(IP_FILE, "r", encoding="utf-8") as f:
-        for line in f:
+    with open(IP_FILE, "r", encoding="utf-8") as file:
+        for line in file:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -59,6 +70,7 @@ def load_ips():
 
 
 def detect_type(ip, username, password):
+    """Auto-detect network device type."""
     try:
         if SSHDetect is None:
             return "linux"
@@ -76,12 +88,14 @@ def detect_type(ip, username, password):
 
 
 def strip_ansi(text):
+    """Remove ANSI escape sequences."""
     if not text:
         return ""
     return re.sub(r"\x1B[@-_][0-?]*[ -/]*[@-~]", "", str(text))
 
 
 def run_command(conn, command):
+    """Execute SSH command safely."""
     try:
         return conn.send_command(command, read_timeout=15)
     except Exception:
@@ -92,6 +106,7 @@ def run_command(conn, command):
 
 
 def build_command(dtype):
+    """Return correct command based on device type."""
     if "cisco" in dtype:
         return "show version"
     if "juniper" in dtype:
@@ -100,6 +115,7 @@ def build_command(dtype):
 
 
 def parse_linux(output):
+    """Parse Linux host output."""
     return {
         "model": "linux-host",
         "serial": "N/A",
@@ -108,6 +124,7 @@ def parse_linux(output):
 
 
 def connect_device(ip, dtype, username, password):
+    """Connect to device and collect information."""
     result = {
         "ip": ip,
         "status": "failed",
@@ -147,28 +164,30 @@ def connect_device(ip, dtype, username, password):
 
         return result
 
-    except Exception as e:
-        result["error"] = str(e)
+    except Exception as exc:
+        result["error"] = str(exc)
         return result
 
     finally:
-        try:
-            if conn:
+        if conn:
+            try:
                 conn.disconnect()
-        except Exception:
-            pass
+            except Exception:
+                pass
 
 
 def save_results(results):
+    """Save results to CSV file."""
     keys = ["ip", "status", "model", "serial", "uptime", "error"]
 
-    with open(RESULTS_FILE, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=keys)
+    with open(RESULTS_FILE, "w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=keys)
         writer.writeheader()
         writer.writerows(results)
 
 
 def main():
+    """Main execution function."""
     username, password = get_credentials()
     devices = load_ips()
 
