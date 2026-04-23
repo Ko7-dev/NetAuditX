@@ -1,5 +1,7 @@
 """NetAuditX - Professional multi-vendor SSH network auditing tool."""
 
+# pylint: disable=broad-exception-caught,line-too-long,subprocess-run-check
+
 import csv
 import os
 import platform
@@ -14,16 +16,18 @@ except ImportError:
     ConnectHandler = None
     SSHDetect = None
 
-
+# Global Configuration
 WORKERS = int(os.getenv("NAX_WORKERS", "20"))
 TIMEOUT = int(os.getenv("NAX_TIMEOUT", "10"))
 OUT_FILE = "audit_results.csv"
 IN_FILE = "ips.txt"
 
-_IP_RE = re.compile(
+# Robust Regex for IPv4 Validation
+_IP_PATTERN = (
     r"^(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}"
     r"(?:25[0-5]|2[0-4]\d|[01]?\d\d?)$"
 )
+_IP_RE = re.compile(_IP_PATTERN)
 
 _VENDOR_CMDS = {
     "cisco": "show version",
@@ -48,21 +52,26 @@ def ping(ip_addr):
     )
 
     try:
-        return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        res = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False
+        )
+        return res.returncode == 0
     except Exception:
         return False
 
 
 def load_inventory():
-    """Load IP inventory file."""
+    """Load IP inventory from the ips.txt file."""
     devices = []
-
     if not os.path.exists(IN_FILE):
         return devices
 
     with open(IN_FILE, "r", encoding="utf-8") as fh:
-        for lineno, raw in enumerate(fh, 1):
-            line = raw.strip()
+        for line in fh:
+            line = line.strip()
             if not line or line.startswith("#"):
                 continue
 
@@ -79,7 +88,7 @@ def load_inventory():
 
 
 def detect_device(ip_addr, user, pwd):
-    """Auto-detect device type."""
+    """Auto-detect device type via Netmiko SSHDetect."""
     if SSHDetect is None:
         return None
 
@@ -97,14 +106,14 @@ def detect_device(ip_addr, user, pwd):
 
 
 def clean_ansi(text):
-    """Remove ANSI characters."""
+    """Remove ANSI escape sequences from terminal output."""
     if not text:
         return ""
     return re.sub(r"\x1B[@-_][0-?]*[ -/]*[@-~]", "", str(text))
 
 
 def run_ssh(conn, cmd):
-    """Run SSH command safely."""
+    """Run SSH command with a fallback mechanism for timing."""
     try:
         return conn.send_command(cmd, read_timeout=15)
     except Exception:
@@ -115,7 +124,7 @@ def run_ssh(conn, cmd):
 
 
 def _vendor_cmd(device_type):
-    """Get command for vendor."""
+    """Map device type to specific audit command."""
     for key, cmd in _VENDOR_CMDS.items():
         if key in device_type:
             return cmd
@@ -123,7 +132,7 @@ def _vendor_cmd(device_type):
 
 
 def create_result(ip_addr):
-    """Create empty result structure."""
+    """Return a standard result dictionary structure."""
     return {
         "ip": ip_addr,
         "status": "failed",
@@ -134,7 +143,7 @@ def create_result(ip_addr):
 
 
 def connect_and_audit(ip_addr, dtype, user, pwd):
-    """Connect to device and collect data."""
+    """Handle connection, data collection, and teardown for a device."""
     result = create_result(ip_addr)
     conn = None
 
@@ -180,7 +189,7 @@ def connect_and_audit(ip_addr, dtype, user, pwd):
 
 
 def save_results(results):
-    """Save CSV results."""
+    """Write audit data to a CSV file."""
     fields = ["ip", "status", "vendor", "uptime", "error"]
 
     with open(OUT_FILE, "w", newline="", encoding="utf-8") as fh:
@@ -190,15 +199,17 @@ def save_results(results):
 
 
 def main():
-    """Main entry point."""
+    """Main execution flow for NetAuditX."""
     user, pwd = get_credentials()
     devices = load_inventory()
 
     if not devices:
+        print(f"No valid IPs found in {IN_FILE}")
         return
 
     results = []
-    with ThreadPoolExecutor(max_workers=min(WORKERS, len(devices))) as ex:
+    limit = min(WORKERS, len(devices))
+    with ThreadPoolExecutor(max_workers=limit) as ex:
         futures = [
             ex.submit(connect_and_audit, ip, dtype, user, pwd)
             for ip, dtype in devices
@@ -208,6 +219,7 @@ def main():
             results.append(f.result())
 
     save_results(results)
+    print(f"Audit completed. Results saved to {OUT_FILE}")
 
 
 if __name__ == "__main__":
