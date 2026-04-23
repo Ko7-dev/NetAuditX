@@ -1,4 +1,4 @@
-"""NetAuditX - Multi-vendor network auditing tool."""
+"""NetAuditX - Network auditing tool."""
 
 import csv
 import os
@@ -8,9 +8,12 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from getpass import getpass
 
+# =========================
+# SAFE IMPORT (Pylint FIX)
+# =========================
 try:
-    from netmiko import ConnectHandler, SSHDetect
-except Exception:  # fallback for CI
+    from netmiko import ConnectHandler, SSHDetect  # type: ignore
+except ImportError:
     ConnectHandler = None
     SSHDetect = None
 
@@ -22,41 +25,33 @@ IP_FILE = "ips.txt"
 
 
 def get_credentials():
-    """Get credentials from environment or user input."""
+    """Get credentials."""
     username = os.getenv("NOC_USER") or input("Username: ").strip()
     password = os.getenv("NOC_PASS") or getpass("Password: ")
     return username, password
 
 
 def ping(ip):
-    """Check host reachability using ping."""
+    """Check host reachability."""
     system = platform.system().lower()
 
-    if system == "windows":
-        cmd = ["ping", "-n", "1", "-w", "1000", ip]
-    else:
-        cmd = ["ping", "-c", "1", "-W", "1", ip]
+    cmd = ["ping", "-n", "1", "-w", "1000", ip] if system == "windows" else ["ping", "-c", "1", "-W", "1", ip]
 
     try:
-        return subprocess.run(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        ).returncode == 0
-    except Exception:
+        return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    except OSError:
         return False
 
 
 def load_ips():
-    """Load devices from inventory file."""
+    """Load inventory."""
     devices = []
 
     if not os.path.exists(IP_FILE):
         return devices
 
-    with open(IP_FILE, "r", encoding="utf-8") as file:
-        for line in file:
+    with open(IP_FILE, "r", encoding="utf-8") as f:
+        for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -70,7 +65,7 @@ def load_ips():
 
 
 def detect_type(ip, username, password):
-    """Auto-detect network device type."""
+    """Detect device type."""
     try:
         if SSHDetect is None:
             return "linux"
@@ -83,30 +78,30 @@ def detect_type(ip, username, password):
             timeout=TIMEOUT,
         )
         return guesser.autodetect() or "linux"
-    except Exception:
+    except (OSError, ValueError):
         return "linux"
 
 
 def strip_ansi(text):
-    """Remove ANSI escape sequences."""
+    """Clean output."""
     if not text:
         return ""
     return re.sub(r"\x1B[@-_][0-?]*[ -/]*[@-~]", "", str(text))
 
 
 def run_command(conn, command):
-    """Execute SSH command safely."""
+    """Run SSH command."""
     try:
         return conn.send_command(command, read_timeout=15)
-    except Exception:
+    except (OSError, ValueError):
         try:
             return conn.send_command_timing(command)
-        except Exception:
+        except (OSError, ValueError):
             return ""
 
 
 def build_command(dtype):
-    """Return correct command based on device type."""
+    """Select command."""
     if "cisco" in dtype:
         return "show version"
     if "juniper" in dtype:
@@ -115,7 +110,7 @@ def build_command(dtype):
 
 
 def parse_linux(output):
-    """Parse Linux host output."""
+    """Parse Linux output."""
     return {
         "model": "linux-host",
         "serial": "N/A",
@@ -124,7 +119,7 @@ def parse_linux(output):
 
 
 def connect_device(ip, dtype, username, password):
-    """Connect to device and collect information."""
+    """Main worker function."""
     result = {
         "ip": ip,
         "status": "failed",
@@ -145,7 +140,7 @@ def connect_device(ip, dtype, username, password):
             dtype = detect_type(ip, username, password)
 
         if ConnectHandler is None:
-            result["error"] = "netmiko not installed"
+            result["error"] = "netmiko missing"
             return result
 
         conn = ConnectHandler(
@@ -164,7 +159,7 @@ def connect_device(ip, dtype, username, password):
 
         return result
 
-    except Exception as exc:
+    except (OSError, ValueError) as exc:
         result["error"] = str(exc)
         return result
 
@@ -172,22 +167,22 @@ def connect_device(ip, dtype, username, password):
         if conn:
             try:
                 conn.disconnect()
-            except Exception:
+            except (OSError, ValueError):
                 pass
 
 
 def save_results(results):
-    """Save results to CSV file."""
+    """Save CSV."""
     keys = ["ip", "status", "model", "serial", "uptime", "error"]
 
-    with open(RESULTS_FILE, "w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=keys)
+    with open(RESULTS_FILE, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
         writer.writeheader()
         writer.writerows(results)
 
 
 def main():
-    """Main execution function."""
+    """Entry point."""
     username, password = get_credentials()
     devices = load_ips()
 
