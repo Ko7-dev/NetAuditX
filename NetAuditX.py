@@ -1,3 +1,5 @@
+"""NetAuditX - Multi-vendor network auditing tool."""
+
 import csv
 import os
 import platform
@@ -15,58 +17,50 @@ IP_FILE = "ips.txt"
 
 
 def get_credentials():
+    """Get credentials from env or user input."""
     username = os.getenv("NOC_USER") or input("Username: ").strip()
     password = os.getenv("NOC_PASS") or getpass("Password: ")
     return username, password
 
 
 def ping(ip):
+    """Check if host is reachable."""
     system = platform.system().lower()
 
-    if system == "windows":
-        cmd = ["ping", "-n", "1", "-w", "1000", ip]
-    else:
-        cmd = ["ping", "-c", "1", "-W", "1", ip]
+    cmd = ["ping", "-n", "1", "-w", "1000", ip] if system == "windows" else \
+          ["ping", "-c", "1", "-W", "1", ip]
 
     try:
-        return subprocess.run(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        ).returncode == 0
-    except FileNotFoundError:
-        return True
-    except Exception:
+        return subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL,
+                              check=False).returncode == 0
+    except OSError:
         return False
 
 
-def load_ips(file_path=IP_FILE):
+def load_ips():
+    """Load device list."""
     devices = []
 
-    if not os.path.exists(file_path):
-        print(f"[ERROR] File not found: {file_path}")
+    if not os.path.exists(IP_FILE):
         return devices
 
-    with open(file_path, "r", encoding="utf-8") as f:
-        for line_no, line in enumerate(f, start=1):
+    with open(IP_FILE, "r", encoding="utf-8") as file:
+        for line in file:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
 
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) < 1 or not parts[0]:
-                print(f"[WARN] Skipping invalid line {line_no}: {line}")
-                continue
-
-            ip = parts[0]
-            dtype = parts[1].lower() if len(parts) > 1 and parts[1] else "auto"
+            parts = line.split(",")
+            ip = parts[0].strip()
+            dtype = parts[1].strip() if len(parts) > 1 else "auto"
             devices.append((ip, dtype))
 
     return devices
 
 
 def detect_type(ip, username, password):
+    """Auto-detect device type."""
     try:
         guesser = SSHDetect(
             device_type="autodetect",
@@ -75,26 +69,23 @@ def detect_type(ip, username, password):
             password=password,
             timeout=TIMEOUT,
         )
-        detected = guesser.autodetect()
-        return detected or "linux"
+        return guesser.autodetect() or "linux"
     except Exception:
         return "linux"
 
 
 def strip_ansi(text):
+    """Clean terminal output."""
     if not text:
         return ""
-    ansi_escape = re.compile(r"\x1B[@-_][0-?]*[ -/]*[@-~]")
-    return ansi_escape.sub("", str(text))
+    pattern = re.compile(r"\x1B[@-_][0-?]*[ -/]*[@-~]")
+    return pattern.sub("", str(text))
 
 
 def run_command(conn, command):
+    """Run SSH command safely."""
     try:
-        return conn.send_command(
-            command,
-            expect_string=r"[#>$\]]",
-            read_timeout=15,
-        )
+        return conn.send_command(command, read_timeout=15)
     except Exception:
         try:
             return conn.send_command_timing(command)
@@ -102,59 +93,8 @@ def run_command(conn, command):
             return ""
 
 
-def parse_linux(output):
-    cleaned = strip_ansi(output).strip()
-    return {
-        "model": "linux-host",
-        "serial": "N/A",
-        "uptime": cleaned if cleaned else "N/A",
-    }
-
-
-def get_first_value(data, keys, default="N/A"):
-    if not isinstance(data, dict):
-        return default
-
-    lowered = {str(k).lower(): v for k, v in data.items()}
-    for key in keys:
-        value = lowered.get(key.lower())
-        if value not in (None, "", []):
-            if isinstance(value, list):
-                return ", ".join(str(x) for x in value)
-            return str(value)
-    return default
-
-
-def parse_textfsm_result(dtype, parsed, raw_output=""):
-    if not isinstance(parsed, list) or not parsed:
-        return None
-
-    data = parsed[0]
-
-    if "cisco" in dtype:
-        model = get_first_value(data, ["HARDWARE", "MODEL", "PRODUCT_ID"])
-        serial = get_first_value(data, ["SERIAL", "SERIAL_NUMBER"])
-        uptime = get_first_value(data, ["UPTIME"])
-        return {
-            "model": model,
-            "serial": serial,
-            "uptime": uptime,
-        }
-
-    if "juniper" in dtype:
-        model = get_first_value(data, ["MODEL", "MODEL_NUMBER", "DESCRIPTION", "ITEM"])
-        serial = get_first_value(data, ["SERIAL", "SERIAL_NUMBER"])
-        uptime = get_first_value(data, ["UPTIME"])
-        return {
-            "model": model,
-            "serial": serial,
-            "uptime": uptime,
-        }
-
-    return None
-
-
 def build_command(dtype):
+    """Return command per device type."""
     if "cisco" in dtype:
         return "show version"
     if "juniper" in dtype:
@@ -162,7 +102,37 @@ def build_command(dtype):
     return "uptime"
 
 
-def connect_and_collect(ip, dtype, username, password):
+def parse_linux(output):
+    """Parse Linux output."""
+    return {
+        "model": "linux-host",
+        "serial": "N/A",
+        "uptime": strip_ansi(output).strip() or "N/A",
+    }
+
+
+def extract_result(dtype, parsed, raw):
+    """Parse structured output if available."""
+    if isinstance(parsed, list) and parsed:
+        data = parsed[0]
+        return {
+            "model": str(data.get("hardware") or data.get("model") or "N/A"),
+            "serial": str(data.get("serial") or "N/A"),
+            "uptime": str(data.get("uptime") or "N/A"),
+        }
+
+    if "linux" in dtype:
+        return parse_linux(raw)
+
+    return {
+        "model": "N/A",
+        "serial": "N/A",
+        "uptime": strip_ansi(raw).strip() or "N/A",
+    }
+
+
+def connect_device(ip, dtype, username, password):
+    """Handle full device connection lifecycle."""
     result = {
         "ip": ip,
         "status": "failed",
@@ -182,21 +152,16 @@ def connect_and_collect(ip, dtype, username, password):
         if dtype == "auto":
             dtype = detect_type(ip, username, password)
 
-        device = {
-            "device_type": dtype,
-            "host": ip,
-            "username": username,
-            "password": password,
-            "timeout": TIMEOUT,
-            "conn_timeout": TIMEOUT,
-            "banner_timeout": TIMEOUT,
-        }
-
-        conn = ConnectHandler(**device)
+        conn = ConnectHandler(
+            device_type=dtype,
+            host=ip,
+            username=username,
+            password=password,
+            timeout=TIMEOUT,
+        )
 
         command = build_command(dtype)
         raw = run_command(conn, command)
-        raw_clean = strip_ansi(raw)
 
         parsed = None
         if "cisco" in dtype or "juniper" in dtype:
@@ -205,74 +170,56 @@ def connect_and_collect(ip, dtype, username, password):
             except Exception:
                 parsed = None
 
-        parsed_data = parse_textfsm_result(dtype, parsed, raw_clean)
-
-        if parsed_data:
-            result.update(parsed_data)
-        else:
-            if "linux" in dtype or dtype == "linux":
-                result.update(parse_linux(raw_clean))
-            else:
-                result["uptime"] = raw_clean.strip() if raw_clean.strip() else "N/A"
-
+        result.update(extract_result(dtype, parsed, raw))
         result["status"] = "success"
+
         return result
 
-    except Exception as e:
-        result["error"] = str(e)
+    except Exception as exc:
+        result["error"] = str(exc)
         return result
 
     finally:
-        try:
-            if conn is not None:
+        if conn:
+            try:
                 conn.disconnect()
-        except Exception:
-            pass
+            except Exception:
+                pass
 
 
-def save_results(results, file_path=RESULTS_FILE):
+def save_results(results):
+    """Save CSV output."""
     keys = ["ip", "status", "model", "serial", "uptime", "error"]
 
-    with open(file_path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=keys)
+    with open(RESULTS_FILE, "w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=keys)
         writer.writeheader()
         writer.writerows(results)
 
 
 def main():
+    """Entry point."""
     username, password = get_credentials()
     devices = load_ips()
 
     if not devices:
-        print("[ERROR] No devices found in ips.txt")
+        print("No devices found")
         return
 
-    results = [None] * len(devices)
-
+    results = []
     workers = min(MAX_WORKERS, len(devices))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_map = {
-            executor.submit(connect_and_collect, ip, dtype, username, password): idx
-            for idx, (ip, dtype) in enumerate(devices)
-        }
 
-        for future in as_completed(future_map):
-            idx = future_map[future]
-            try:
-                results[idx] = future.result()
-            except Exception as e:
-                ip, _ = devices[idx]
-                results[idx] = {
-                    "ip": ip,
-                    "status": "failed",
-                    "model": "N/A",
-                    "serial": "N/A",
-                    "uptime": "N/A",
-                    "error": str(e),
-                }
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(connect_device, ip, dtype, username, password)
+            for ip, dtype in devices
+        ]
+
+        for future in as_completed(futures):
+            results.append(future.result())
 
     save_results(results)
-    print(f"[OK] Results saved to {RESULTS_FILE}")
+    print(f"Saved: {RESULTS_FILE}")
 
 
 if __name__ == "__main__":
